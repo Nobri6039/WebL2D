@@ -1,0 +1,29 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "修长小狗_糯布.moc3",
+		"Textures": [
+			"修长小狗_糯布.2048/texture_00.png"
+		],
+		"Physics": "修长小狗_糯布.physics3.json",
+		"DisplayInfo": "修长小狗_糯布.cdi3.json"
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY",
+				"ParamMouthForm"
+			]
+		}
+	]
+}

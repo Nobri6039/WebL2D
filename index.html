@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0912">
+  <title>糯布面捕 · Live2D 摄像头面捕</title>
+  <meta name="description" content="在浏览器里用摄像头驱动 Live2D 模型，支持自定义背景与面捕参数调节，画面仅在本机处理。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230d0a16'/%3E%3Cpath d='M18 40c0-10 6-18 14-18s14 8 14 18' fill='none' stroke='%237ef0c8' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='24' cy='34' r='2.6' fill='%237ef0c8'/%3E%3Ccircle cx='40' cy='34' r='2.6' fill='%237ef0c8'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- 图标库 -->
+  <svg class="svg-defs" aria-hidden="true" focusable="false">
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1-1.6c.3-.5.8-.7 1.4-.7h3.8c.6 0 1.1.2 1.4.7l1 1.6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.4"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M5 4v5M5 15v5M12 4v9M12 19v1M19 4v1M19 11v9"/><circle cx="5" cy="12" r="2"/><circle cx="12" cy="16" r="2"/><circle cx="19" cy="8" r="2"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="m4.5 17 4.7-4.8 3.1 3.1 2.5-2.6 4.7 4.8"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3.5v11M7.5 10.5 12 15l4.5-4.5M4.5 19.5h15"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5c.7 5 2.9 7.3 8 8-5.1.7-7.3 3-8 8-.7-5-2.9-7.3-8-8 5.1-.7 7.3-3 8-8Z"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M3 12s3.2-6 9-6 9 6 9 6-3.2 6-9 6-9-6-9-6Z"/><circle cx="12" cy="12" r="2.6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.2 4.2L19 7"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
+    <symbol id="i-fullscreen-exit" viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></symbol>
+  </svg>
+
+  <div id="app" class="app">
+    <!-- 背景层 -->
+    <div id="bg" class="bg" data-preset="aurora">
+      <div class="bg-fill"></div>
+      <canvas id="bgCam" class="bg-cam" width="640" height="360" aria-hidden="true"></canvas>
+      <div class="bg-blobs" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="bg-vignette" aria-hidden="true"></div>
+      <div class="bg-dim" aria-hidden="true"></div>
+    </div>
+
+    <!-- Live2D 舞台 -->
+    <main id="stage" class="stage" aria-label="Live2D 模型">
+      <canvas id="live2d" class="live2d"></canvas>
+    </main>
+
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M8.5 22c0-5.5 3.3-10 7.5-10s7.5 4.5 7.5 10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="12.5" cy="19" r="1.5" fill="currentColor"/><circle cx="19.5" cy="19" r="1.5" fill="currentColor"/><path d="M14.6 22.2c.8.7 1.9.7 2.8 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </div>
+        <div class="brand-text">
+          <strong id="brandName">糯布面捕</strong>
+          <span>LIVE2D · FACE TRACKING</span>
+        </div>
+      </div>
+
+      <div class="status" id="status" data-state="off" role="status" aria-live="polite">
+        <span class="status-dot"></span>
+        <span id="statusText">摄像头未开启</span>
+      </div>
+
+      <nav class="top-actions" aria-label="主要操作">
+        <button type="button" class="top-btn top-btn-primary" id="cameraBtn" title="开启摄像头面捕" aria-label="开启面捕">
+          <svg><use href="#i-camera"/></svg><span id="cameraLabel">开启面捕</span>
+        </button>
+        <button type="button" class="top-btn" id="openParams" title="面捕参数" aria-label="面捕参数">
+          <svg><use href="#i-sliders"/></svg><span>面捕参数</span>
+        </button>
+        <button type="button" class="top-btn" id="openBackground" title="背景" aria-label="背景">
+          <svg><use href="#i-image"/></svg><span>背景</span>
+        </button>
+        <button type="button" class="top-btn icon-only" id="screenshotBtn" title="保存截图 (S)" aria-label="保存截图">
+          <svg><use href="#i-download"/></svg>
+        </button>
+        <button type="button" class="top-btn icon-only" id="fullscreenBtn" title="全屏 (F)" aria-label="全屏">
+          <svg><use href="#i-expand"/></svg>
+        </button>
+      </nav>
+    </header>
+
+    <!-- 首次进入的欢迎层 -->
+    <section class="welcome" id="welcome">
+      <div class="welcome-card">
+        <div class="eyebrow"><i class="live-dot"></i> 浏览器本地实时面捕</div>
+        <h1>让 <em id="heroName">糯布</em><br>跟着你动起来</h1>
+        <p class="lead">转头、眨眼、说话、微笑，都会实时同步到 Live2D 模型上。不需要安装任何东西。</p>
+        <ul class="features">
+          <li><span class="feature-ico">01</span><div><b>本地推理</b><small>画面只在你的浏览器里处理，不上传</small></div></li>
+          <li><span class="feature-ico">02</span><div><b>自由背景</b><small>极光、图片、摄像头虚化、透明棋盘</small></div></li>
+          <li><span class="feature-ico">03</span><div><b>面捕可调</b><small>强度、平滑、镜像，还能一键重新校准</small></div></li>
+        </ul>
+        <div class="welcome-actions">
+          <button type="button" class="btn btn-primary btn-lg" id="startCameraBtn">
+            <svg><use href="#i-camera"/></svg> 开启摄像头面捕
+          </button>
+          <button type="button" class="btn btn-ghost btn-lg" id="browseBtn">先看看模型</button>
+        </div>
+        <div class="welcome-note" id="welcomeNote"><svg><use href="#i-eye"/></svg> <span id="welcomeNoteText">首次使用浏览器会请求摄像头权限 · 仅本机处理</span></div>
+      </div>
+    </section>
+
+    <!-- 摄像头预览 -->
+    <aside class="preview is-hidden" id="preview" aria-label="摄像头预览">
+      <video id="camVideo" autoplay muted playsinline></video>
+      <canvas id="previewCanvas" width="432" height="324"></canvas>
+      <div class="preview-top">
+        <span class="preview-title"><i class="live-dot"></i> 面捕预览</span>
+        <button type="button" class="preview-hide" id="previewHide" title="隐藏预览" aria-label="隐藏预览">
+          <svg><use href="#i-close"/></svg>
+        </button>
+      </div>
+      <div class="preview-hint" id="previewHint">保持正脸</div>
+      <div class="preview-loading" id="previewLoading"><span class="spinner"></span><span id="previewLoadingText">正在启动摄像头…</span></div>
+    </aside>
+
+    <!-- 底部提示 -->
+    <div class="stage-hint" id="stageHint">
+      <span><kbd>C</kbd> 面捕</span><span><kbd>B</kbd> 背景</span><span><kbd>P</kbd> 参数</span><span><kbd>S</kbd> 截图</span>
+    </div>
+
+    <!-- 右侧控制台 -->
+    <div class="drawer-scrim" id="drawerScrim"></div>
+    <aside class="drawer" id="drawer" aria-hidden="true" aria-label="控制台">
+      <div class="drawer-head">
+        <div class="tabs" role="tablist" aria-label="控制台分类">
+          <button type="button" class="tab is-active" role="tab" aria-selected="true" data-tab="tracking">面捕</button>
+          <button type="button" class="tab" role="tab" aria-selected="false" data-tab="background">背景</button>
+          <button type="button" class="tab" role="tab" aria-selected="false" data-tab="view">视图</button>
+        </div>
+        <button type="button" class="icon-close" id="drawerClose" aria-label="关闭控制台"><svg><use href="#i-close"/></svg></button>
+      </div>
+
+      <div class="drawer-body">
+        <section class="tab-panel is-active" data-panel="tracking">
+          <div class="panel-head">
+            <h2>面捕强度</h2>
+            <button type="button" class="link-btn" id="resetGains">恢复默认</button>
+          </div>
+          <div class="slider-stack" id="gainSliders"></div>
+
+          <div class="panel-block">
+            <h3>手感</h3>
+            <div class="slider-row">
+              <div class="slider-label"><span>平滑</span><b id="smoothingVal">35%</b></div>
+              <input id="smoothing" type="range" min="0" max="90" step="1" value="35" aria-label="平滑">
+            </div>
+            <div class="slider-row">
+              <div class="slider-label"><span>转动上限</span><b id="angleLimitVal">30°</b></div>
+              <input id="angleLimit" type="range" min="10" max="30" step="1" value="30" aria-label="转动上限">
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-copy"><b>镜像跟随</b><small>像照镜子一样同向转动</small></div>
+              <button type="button" class="switch" id="mirrorToggle" role="switch" aria-checked="true" aria-label="镜像跟随"><i></i></button>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-copy"><b>面部关键点</b><small>在预览中画出追踪网格</small></div>
+              <button type="button" class="switch" id="landmarksToggle" role="switch" aria-checked="true" aria-label="显示面部关键点"><i></i></button>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-copy"><b>鼠标跟随</b><small>关闭摄像头时，用鼠标逗它转头</small></div>
+              <button type="button" class="switch" id="mouseFollowToggle" role="switch" aria-checked="true" aria-label="鼠标跟随"><i></i></button>
+            </div>
+          </div>
+
+          <div class="panel-block">
+            <h3>摄像头</h3>
+            <label class="select-row">
+              <span>设备</span>
+              <select id="cameraSelect"><option value="">默认摄像头</option></select>
+            </label>
+            <div class="inline-actions">
+              <button type="button" class="btn btn-soft" id="calibrateBtn"><svg><use href="#i-refresh"/></svg> 重新校准</button>
+              <button type="button" class="btn btn-soft danger" id="stopCameraBtn"><svg><use href="#i-stop"/></svg> 关闭面捕</button>
+            </div>
+            <p class="fineprint">开启后保持正脸约 1 秒，会自动记录你的头部中点；换人、换姿势后可以重新校准。</p>
+          </div>
+
+          <div class="panel-block telemetry">
+            <div class="panel-head">
+              <h3>实时数据</h3>
+              <span class="mini-pill" id="telemetryState">待机</span>
+            </div>
+            <div class="meter-row"><span>头部 X</span><div class="meter"><i id="meterYaw"></i></div><b id="valYaw">0°</b></div>
+            <div class="meter-row"><span>头部 Y</span><div class="meter"><i id="meterPitch"></i></div><b id="valPitch">0°</b></div>
+            <div class="meter-row"><span>头部 Z</span><div class="meter"><i id="meterRoll"></i></div><b id="valRoll">0°</b></div>
+            <div class="meter-row"><span>嘴巴</span><div class="meter"><i id="meterMouth"></i></div><b id="valMouth">0%</b></div>
+            <div class="meter-row"><span>眨眼</span><div class="meter"><i id="meterBlink"></i></div><b id="valBlink">0%</b></div>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="background" hidden>
+          <div class="panel-head"><h2>背景</h2><span class="mini-pill" id="bgCurrent">极光</span></div>
+          <div class="bg-grid" id="bgGrid"></div>
+
+          <div class="panel-block" id="colorBlock" hidden>
+            <h3>纯色</h3>
+            <label class="color-row">
+              <input type="color" id="bgColor" value="#0d0a16" aria-label="背景颜色">
+              <span id="bgColorValue">#0d0a16</span>
+            </label>
+          </div>
+
+          <div class="panel-block" id="imageBlock" hidden>
+            <h3>自定义图片</h3>
+            <input type="file" id="bgFile" accept="image/*" hidden>
+            <div class="inline-actions">
+              <button type="button" class="btn btn-soft" id="bgUploadBtn"><svg><use href="#i-image"/></svg> 选择图片</button>
+              <button type="button" class="btn btn-soft" id="bgClearBtn">清除</button>
+            </div>
+            <p class="fineprint">也可以把图片直接拖进页面。图片会压缩后保存在本机浏览器里，不会上传。</p>
+          </div>
+
+          <div class="panel-block">
+            <h3>氛围</h3>
+            <div class="slider-row">
+              <div class="slider-label"><span>背景模糊</span><b id="bgBlurVal">0px</b></div>
+              <input id="bgBlur" type="range" min="0" max="40" step="1" value="0" aria-label="背景模糊">
+            </div>
+            <div class="slider-row">
+              <div class="slider-label"><span>压暗</span><b id="bgDimVal">24%</b></div>
+              <input id="bgDim" type="range" min="0" max="70" step="1" value="24" aria-label="背景压暗">
+            </div>
+            <p class="fineprint">压暗可以让模型更突出；摄像头背景建议配合 12–24px 模糊使用。</p>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="view" hidden>
+          <div class="panel-head"><h2>视图</h2><button type="button" class="link-btn" id="resetView">重置</button></div>
+          <div class="panel-block">
+            <div class="slider-row">
+              <div class="slider-label"><span>缩放</span><b id="zoomVal">100%</b></div>
+              <input id="zoom" type="range" min="60" max="180" step="1" value="100" aria-label="缩放">
+            </div>
+            <div class="slider-row">
+              <div class="slider-label"><span>上下位置</span><b id="offsetYVal">0%</b></div>
+              <input id="offsetY" type="range" min="-40" max="40" step="1" value="0" aria-label="上下位置">
+            </div>
+            <div class="slider-row">
+              <div class="slider-label"><span>左右位置</span><b id="offsetXVal">0%</b></div>
+              <input id="offsetX" type="range" min="-40" max="40" step="1" value="0" aria-label="左右位置">
+            </div>
+          </div>
+          <div class="panel-block">
+            <h3>显示</h3>
+            <div class="toggle-row">
+              <div class="toggle-copy"><b>摄像头预览</b><small>左下角的小窗</small></div>
+              <button type="button" class="switch" id="previewToggle" role="switch" aria-checked="true" aria-label="显示摄像头预览"><i></i></button>
+            </div>
+            <div class="inline-actions">
+              <button type="button" class="btn btn-primary" id="shotFromPanel"><svg><use href="#i-download"/></svg> 保存当前画面</button>
+            </div>
+          </div>
+          <div class="panel-block">
+            <h3>关于</h3>
+            <p class="fineprint about-text">WebL2D · 纯前端 Live2D 面捕。<br>模型渲染：pixi-live2d-display + Cubism Core<br>面捕：MediaPipe Face Landmarker<br><br>摄像头画面与模型参数全部在浏览器本地计算，没有服务器，也不会上传。</p>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <!-- 拖入图片提示 -->
+    <div class="drop-overlay" id="dropOverlay" aria-hidden="true"><div><svg><use href="#i-image"/></svg><b>松开鼠标，设为背景</b><span>支持 JPG / PNG / WebP</span></div></div>
+
+    <!-- 启动加载 -->
+    <div class="boot" id="boot">
+      <div class="boot-mark" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M17 43c0-11 6.7-20 15-20s15 9 15 20" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="25" cy="37" r="2.8" fill="currentColor"/><circle cx="39" cy="37" r="2.8" fill="currentColor"/><path d="M29 43c1.6 1.4 3.9 1.4 5.6 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></div>
+      <div class="boot-text" id="bootText">正在加载 Live2D 模型…</div>
+      <div class="boot-bar"><i id="bootBar"></i></div>
+      <div class="boot-sub">首次加载大约需要几秒钟</div>
+    </div>
+
+    <div class="fatal" id="fatal" hidden>
+      <div class="fatal-card">
+        <h2>模型加载失败</h2>
+        <p id="fatalText">请确认模型文件完整，并通过本地服务器打开本页面。</p>
+        <button type="button" class="btn btn-primary" id="fatalReload">重新加载</button>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script src="vendor/pixi.min.js"></script>
+  <script src="vendor/live2dcubismcore.min.js"></script>
+  <script src="vendor/cubism4.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
