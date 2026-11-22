@@ -39,6 +39,10 @@ jobs:
         with:
           path: _site
 
+      # 避免 Pages 部署接口在 artifact 刚上传完时还查不到（Found 0 artifacts）
+      - name: Wait for artifact indexing
+        run: sleep 8
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
