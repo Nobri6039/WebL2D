@@ -1,0 +1,80 @@
+/*
+ * WebL2D · OBS 浏览器源专用样式
+ *
+ * 用法：
+ *   1. 页面地址使用 http://127.0.0.1:5180/?stream=1
+ *   2. 或在 OBS 浏览器源的自定义 CSS 里粘贴本文件
+ *
+ * 目标：只保留 Live2D 画布，隐藏所有网页 UI、背景和提示。
+ */
+
+html,
+body {
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  background: transparent !important;
+}
+
+#app {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  background: transparent !important;
+  isolation: auto !important;
+}
+
+/* 只保留 #stage，再只保留 #stage 里的 Live2D canvas */
+body > :not(#app),
+#app > :not(#stage),
+#stage > :not(#live2d) {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+#stage {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 1 !important;
+  background: transparent !important;
+  cursor: none !important;
+}
+
+#live2d {
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+  background: transparent !important;
+  cursor: none !important;
+}
+
+/* 明确隐藏常见的 UI，防止其他规则或组件重新显示 */
+#bg,
+.bg,
+.topbar,
+.drawer,
+.drawer-scrim,
+.welcome,
+.preview,
+.stage-hint,
+.expression-rail,
+.drop-overlay,
+.boot,
+.fatal,
+.toast,
+.status,
+.svg-defs {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}

@@ -253,3 +253,331 @@ export function describeCameraError(err) {
   }
   return { title: '摄像头启动失败', text: raw };
 }
+
+/**
+ * 音频口型：独立于摄像头麦克风，只在用户打开开关时申请权限。
+ * 输出 0..1 的平滑音量，交给 mapper 与摄像头 jawOpen 合并。
+ */
+export class AudioTracker {
+  constructor() {
+    this.stream = null;
+    this.context = null;
+    this.source = null;
+    this.analyser = null;
+    this.data = null;
+    this.freq = null;
+    this.vowels = { A: 0, I: 0, U: 0, E: 0, O: 0 };
+    this.profiles = {};
+    this.weights = { A: 0.6, I: 0.75, U: 1.55, E: 0.55, O: 1.55 };
+    this.vowelSmoothing = 0.045;
+    this._calibration = null;
+    this.rawLevel = 0;
+    this.level = 0;
+    this.gain = 1;
+    this.noiseGate = 0.05;
+    this._lastAt = 0;
+    this._startedAt = 0;
+    this._floor = 0;
+    this._calibrating = false;
+  }
+
+  get active() {
+    return !!this.stream;
+  }
+
+  setOptions({ gain, noiseGate } = {}) {
+    if (Number.isFinite(Number(gain))) this.gain = Math.max(0.1, Math.min(4, Number(gain)));
+    if (Number.isFinite(Number(noiseGate))) this.noiseGate = Math.max(0, Math.min(0.4, Number(noiseGate)));
+  }
+
+  setProfiles(profiles) {
+    this.profiles = profiles && typeof profiles === 'object' && !Array.isArray(profiles) ? profiles : {};
+  }
+
+  setWeights(weights) {
+    const base = { A: 0.6, I: 0.75, U: 1.55, E: 0.55, O: 1.55 };
+    this.weights = {};
+    for (const key of Object.keys(base)) {
+      const v = Number(weights?.[key]);
+      this.weights[key] = Number.isFinite(v) ? Math.max(0.1, Math.min(3, v)) : base[key];
+    }
+  }
+
+  setVowelSmoothing(ms) {
+    const v = Number(ms);
+    this.vowelSmoothing = Number.isFinite(v) ? Math.max(0, Math.min(150, v)) / 1000 : 0.045;
+  }
+
+  /** 采集一个元音的频段包络；用户对着麦克风持续发音即可。 */
+  calibrate(key, duration = 1200) {
+    if (!this.analyser || !key) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      this._calibration = {
+        key,
+        end: performance.now() + Math.max(500, duration),
+        sums: new Float64Array(6),
+        count: 0,
+        resolve,
+      };
+    });
+  }
+
+  async start() {
+    if (this.stream) return this.stream;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      const err = new Error('MIC_UNSUPPORTED');
+      err.name = 'NotSupportedError';
+      throw err;
+    }
+    if (!window.isSecureContext) {
+      const err = new Error('MIC_INSECURE');
+      err.name = 'SecurityError';
+      throw err;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+      });
+    } catch (err) {
+      if (err?.name === 'OverconstrainedError') {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } else {
+        throw err;
+      }
+    }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) {
+      stream.getTracks().forEach((t) => t.stop());
+      const err = new Error('AUDIO_UNSUPPORTED');
+      err.name = 'NotSupportedError';
+      throw err;
+    }
+    const context = new Ctx();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.12;
+    source.connect(analyser);
+    if (context.state === 'suspended') await context.resume().catch(() => {});
+    this.stream = stream;
+    this.context = context;
+    this.source = source;
+    this.analyser = analyser;
+    this.data = new Uint8Array(analyser.fftSize);
+    this.freq = new Uint8Array(analyser.frequencyBinCount);
+    this.vowels = { A: 0, I: 0, U: 0, E: 0, O: 0 };
+    this.rawLevel = 0;
+    this.level = 0;
+    this._lastAt = 0;
+    this._startedAt = performance.now();
+    this._floor = 0;
+    this._calibrating = true;
+    return stream;
+  }
+
+  update(now = performance.now()) {
+    if (!this.analyser) {
+      this.level = Math.max(0, this.level - 0.08);
+      return this.level;
+    }
+    this.analyser.getByteTimeDomainData(this.data);
+    let sum = 0;
+    for (let i = 0; i < this.data.length; i++) {
+      const v = (this.data[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / this.data.length);
+
+    // 启动后短暂采样环境底噪；说话时的高音量不会被记成底噪。
+    if (this._calibrating) {
+      if (now - this._startedAt < 550) {
+        if (rms < 0.03) this._floor = this._floor ? Math.min(this._floor, rms) : rms;
+        this.level = 0;
+        return 0;
+      }
+      this._calibrating = false;
+      this._floor = Math.min(this._floor || 0, 0.02);
+    }
+
+    // 噪声门 = 用户门限、环境底噪的余量、一个绝对下限，三者取最大。
+    const gate = Math.max(this.noiseGate * 0.25, this._floor * 2.5, 0.005);
+    const signal = rms - gate;
+    let target = signal > 0 ? Math.min(1, signal * 9 * this.gain) : 0;
+    if (target < 0.01) target = 0;
+    this.rawLevel = target;
+
+    const dt = this._lastAt ? Math.max(0.001, Math.min(0.1, (now - this._lastAt) / 1000)) : 0.016;
+    this._lastAt = now;
+    const attack = 1 - Math.exp(-dt / 0.006);
+    const release = 1 - Math.exp(-dt / 0.025);
+    this.level += (target - this.level) * (target > this.level ? attack : release);
+    if (this.level < 0.008) this.level = 0;
+
+    // 元音 A/I/U/E/O：频段包络 + 原始音量，不做帧间平滑。
+    if (this.rawLevel > 0.015 && this.freq) {
+      this.analyser.getByteFrequencyData(this.freq);
+      if (this._calibration) {
+        const profile = this._bandProfile();
+        if (profile && this.rawLevel > 0.02) {
+          for (let i = 0; i < 6; i++) this._calibration.sums[i] += profile[i];
+          this._calibration.count += 1;
+        }
+        if (now >= this._calibration.end) {
+          const c = this._calibration;
+          this._calibration = null;
+          if (c.count) {
+            const sums = c.sums;
+            const total = sums.reduce((a, b) => a + b, 0);
+            const profile = total > 0 ? [...sums].map((v) => v / total) : null;
+            if (profile) this.profiles[c.key] = profile;
+            c.resolve(profile);
+          } else {
+            c.resolve(null);
+          }
+        }
+      }
+      const scores = this._vowelScores(this.context?.sampleRate || 48000, this.rawLevel);
+      // 极短交叉过渡：保留连续说话的衔接，但不能拖成慢动作。
+      const vowelAlpha = 1 - Math.exp(-dt / Math.max(0.001, this.vowelSmoothing));
+      for (const key of Object.keys(this.vowels)) {
+        const target = scores[key] || 0;
+        this.vowels[key] += (target - this.vowels[key]) * vowelAlpha;
+        if (this.vowels[key] < 0.004) this.vowels[key] = 0;
+      }
+    } else {
+      for (const key of Object.keys(this.vowels)) this.vowels[key] = 0;
+    }
+    return this.level;
+  }
+
+  _bandProfile() {
+    if (!this.freq) return null;
+    const sr = this.context?.sampleRate || 48000;
+    const bins = this.freq.length;
+    const hzPerBin = sr / 2 / bins;
+    const bands = [
+      [200, 450],
+      [450, 700],
+      [700, 1100],
+      [1100, 1600],
+      [1600, 2400],
+      [2400, 3300],
+    ];
+    const energy = bands.map(() => 0);
+    for (let i = 1; i < bins; i++) {
+      const hz = i * hzPerBin;
+      for (let b = 0; b < bands.length; b++) {
+        if (hz >= bands[b][0] && hz < bands[b][1]) {
+          energy[b] += this.freq[i] / 255;
+          break;
+        }
+      }
+    }
+    const total = energy.reduce((a, b) => a + b, 0);
+    if (total < 0.05) return null;
+    return energy.map((v) => v / total);
+  }
+
+  _vowelScores(sampleRate, level) {
+    const profile = this._bandProfile();
+    if (!profile) return { A: 0, I: 0, U: 0, E: 0, O: 0 };
+    const keys = ['A', 'I', 'U', 'E', 'O'];
+    const calibrated = keys.every((k) => Array.isArray(this.profiles[k]) && this.profiles[k].length === 6);
+    const weights = {};
+    let sum = 0;
+    if (calibrated) {
+      // 已逐个校准：余弦相似度，最接近的元音权重最高。
+      const sims = keys.map((k) => {
+        const p = this.profiles[k];
+        let dot = 0;
+        let na = 0;
+        let nb = 0;
+        for (let i = 0; i < 6; i++) {
+          dot += profile[i] * p[i];
+          na += profile[i] * profile[i];
+          nb += p[i] * p[i];
+        }
+        return dot / Math.max(1e-9, Math.sqrt(na) * Math.sqrt(nb));
+      });
+      const max = Math.max(...sims);
+      keys.forEach((k, i) => {
+        const w = Math.exp((sims[i] - max) * 7);
+        weights[k] = w;
+        sum += w;
+      });
+    } else {
+      // 未校准：先用固定频段模板；校准后会自动切换到个人声线。
+      const templates = {
+        A: [0.16, 0.28, 0.30, 0.17, 0.07, 0.02],
+        I: [0.28, 0.08, 0.07, 0.14, 0.30, 0.13],
+        U: [0.42, 0.30, 0.13, 0.08, 0.05, 0.02],
+        E: [0.18, 0.26, 0.21, 0.18, 0.13, 0.04],
+        O: [0.22, 0.35, 0.25, 0.10, 0.05, 0.03],
+      };
+      const distance = {};
+      for (const [key, t] of Object.entries(templates)) {
+        distance[key] = Math.sqrt(profile.reduce((s, v, i) => s + (v - t[i]) ** 2, 0));
+      }
+      const min = Math.min(...Object.values(distance));
+      for (const [key, d] of Object.entries(distance)) {
+        const w = Math.exp(-(d - min) * 9);
+        weights[key] = w;
+        sum += w;
+      }
+    }
+    const out = {};
+    for (const key of Object.keys(weights)) {
+      const w = Number(this.weights[key]);
+      const gain = Number.isFinite(w) ? w : 1;
+      out[key] = Math.min(1.5, (weights[key] / sum) * level * gain);
+    }
+    return out;
+  }
+
+  stop() {
+    if (this._calibration) {
+      this._calibration.resolve(null);
+      this._calibration = null;
+    }
+    for (const track of this.stream?.getTracks() || []) track.stop();
+    this.stream = null;
+    try {
+      this.source?.disconnect();
+      this.analyser?.disconnect();
+      this.context?.close();
+    } catch {
+      /* ignore */
+    }
+    this.source = null;
+    this.analyser = null;
+    this.context = null;
+    this.data = null;
+    this.freq = null;
+    this.vowels = { A: 0, I: 0, U: 0, E: 0, O: 0 };
+    this.profiles = {};
+    this.weights = { A: 0.6, I: 0.75, U: 1.55, E: 0.55, O: 1.55 };
+    this.vowelSmoothing = 0.045;
+    this._calibration = null;
+    this.rawLevel = 0;
+    this.level = 0;
+    this._lastAt = 0;
+    this._startedAt = 0;
+    this._floor = 0;
+    this._calibrating = false;
+  }
+}
+
+export function describeMicError(err) {
+  const name = err?.name || '';
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    return { title: '麦克风权限被拒绝', text: '点击地址栏左侧的麦克风图标，允许本站使用麦克风后重试。' };
+  }
+  if (name === 'NotFoundError') {
+    return { title: '没有找到麦克风', text: '请确认麦克风已连接，并且没有被系统禁用。' };
+  }
+  if (name === 'NotReadableError') {
+    return { title: '麦克风被占用了', text: '另一个程序正在使用麦克风，关闭它之后重试。' };
+  }
+  return { title: '麦克风启动失败', text: err?.message || String(err) };
+}

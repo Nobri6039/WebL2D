@@ -9,14 +9,18 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import mimetypes
 import os
 import socket
 import sys
 import threading
+import urllib.parse
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from scan_models import build_manifest
 
 ROOT = Path(__file__).resolve().parent
 
@@ -47,6 +51,29 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         super().end_headers()
+
+    def do_GET(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path.rstrip("/")
+        if path.endswith("/api/models"):
+            prefix = path[: -len("/api/models")].strip("/")
+            base = Path(self.directory) / prefix if prefix else Path(self.directory)
+            try:
+                models = build_manifest(base)
+                body = json.dumps(models, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as err:  # pragma: no cover - diagnostic path
+                body = json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            return
+        super().do_GET()
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("[web] " + (fmt % args) + "\n")

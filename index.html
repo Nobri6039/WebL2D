@@ -4,10 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0b0912">
-  <title>糯布面捕 · Live2D 摄像头面捕</title>
-  <meta name="description" content="在浏览器里用摄像头驱动 Live2D 模型，支持自定义背景与面捕参数调节，画面仅在本机处理。">
+  <title>Live2D 面捕 · WebL2D</title>
+  <meta name="description" content="在浏览器里用摄像头驱动任意 Live2D 模型：可编辑映射、物理手感、表情与音频口型；画面仅在本机处理。">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230d0a16'/%3E%3Cpath d='M18 40c0-10 6-18 14-18s14 8 14 18' fill='none' stroke='%237ef0c8' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='24' cy='34' r='2.6' fill='%237ef0c8'/%3E%3Ccircle cx='40' cy='34' r='2.6' fill='%237ef0c8'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
+  <link id="obsStyles" rel="stylesheet" href="css/obs.css" media="none">
+  <script>
+    if (new URLSearchParams(location.search).get('stream') === '1') {
+      document.documentElement.classList.add('stream-mode');
+      var obsLink = document.getElementById('obsStyles');
+      if (obsLink) obsLink.media = 'all';
+    }
+  </script>
 </head>
 <body>
   <!-- 图标库 -->
@@ -49,10 +57,12 @@
           <svg viewBox="0 0 32 32"><path d="M8.5 22c0-5.5 3.3-10 7.5-10s7.5 4.5 7.5 10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="12.5" cy="19" r="1.5" fill="currentColor"/><circle cx="19.5" cy="19" r="1.5" fill="currentColor"/><path d="M14.6 22.2c.8.7 1.9.7 2.8 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         </div>
         <div class="brand-text">
-          <strong id="brandName">糯布面捕</strong>
+          <strong id="brandName">Live2D 面捕</strong>
           <span>LIVE2D · FACE TRACKING</span>
         </div>
       </div>
+
+      <select class="model-select top-model-select" id="modelSelectTop" aria-label="切换模型"></select>
 
       <div class="status" id="status" data-state="off" role="status" aria-live="polite">
         <span class="status-dot"></span>
@@ -82,12 +92,12 @@
     <section class="welcome" id="welcome">
       <div class="welcome-card">
         <div class="eyebrow"><i class="live-dot"></i> 浏览器本地实时面捕</div>
-        <h1>让 <em id="heroName">糯布</em><br>跟着你动起来</h1>
+        <h1>让 <em id="heroName">模型</em><br>跟着你动起来</h1>
         <p class="lead">转头、眨眼、说话、微笑，都会实时同步到 Live2D 模型上。不需要安装任何东西。</p>
         <ul class="features">
           <li><span class="feature-ico">01</span><div><b>本地推理</b><small>画面只在你的浏览器里处理，不上传</small></div></li>
           <li><span class="feature-ico">02</span><div><b>自由背景</b><small>极光、图片、摄像头虚化、透明棋盘</small></div></li>
-          <li><span class="feature-ico">03</span><div><b>面捕可调</b><small>强度、平滑、镜像，还能一键重新校准</small></div></li>
+          <li><span class="feature-ico">03</span><div><b>面捕可调</b><small>映射表、平滑、镜像，还能一键重新校准</small></div></li>
         </ul>
         <div class="welcome-actions">
           <button type="button" class="btn btn-primary btn-lg" id="startCameraBtn">
@@ -113,8 +123,21 @@
       <div class="preview-loading" id="previewLoading"><span class="spinner"></span><span id="previewLoadingText">正在启动摄像头…</span></div>
     </aside>
 
+    <!-- 表情屏上按键（右侧） -->
+    <div class="expression-rail" id="expressionRail" hidden>
+      <div class="expression-rail-head">
+        <span>表情</span>
+        <button type="button" class="expression-rail-toggle" id="expressionRailToggle" title="收起表情栏" aria-label="收起表情栏">−</button>
+      </div>
+      <div class="expression-rail-list" id="expressionRailList"></div>
+    </div>
+
     <!-- 底部提示 -->
     <div class="stage-hint" id="stageHint">
+      <span class="mouse-hint"><b>左键</b>拖拽</span>
+      <span class="mouse-hint"><b>滚轮</b>缩放</span>
+      <span class="mouse-hint"><b>中键</b>复位</span>
+      <span class="hint-divider"></span>
       <span><kbd>C</kbd> 面捕</span><span><kbd>B</kbd> 背景</span><span><kbd>P</kbd> 参数</span><span><kbd>S</kbd> 截图</span>
     </div>
 
@@ -124,6 +147,8 @@
       <div class="drawer-head">
         <div class="tabs" role="tablist" aria-label="控制台分类">
           <button type="button" class="tab is-active" role="tab" aria-selected="true" data-tab="tracking">面捕</button>
+          <button type="button" class="tab" role="tab" aria-selected="false" data-tab="mapping">映射</button>
+          <button type="button" class="tab" role="tab" aria-selected="false" data-tab="expressions">表情</button>
           <button type="button" class="tab" role="tab" aria-selected="false" data-tab="background">背景</button>
           <button type="button" class="tab" role="tab" aria-selected="false" data-tab="view">视图</button>
         </div>
@@ -133,20 +158,15 @@
       <div class="drawer-body">
         <section class="tab-panel is-active" data-panel="tracking">
           <div class="panel-head">
-            <h2>面捕强度</h2>
-            <button type="button" class="link-btn" id="resetGains">恢复默认</button>
+            <h2>面捕手感</h2>
+            <button type="button" class="link-btn" id="goMapping">打开参数映射 →</button>
           </div>
-          <div class="slider-stack" id="gainSliders"></div>
 
           <div class="panel-block">
-            <h3>手感</h3>
+            <h3>跟随手感</h3>
             <div class="slider-row">
               <div class="slider-label"><span>平滑</span><b id="smoothingVal">35%</b></div>
               <input id="smoothing" type="range" min="0" max="90" step="1" value="35" aria-label="平滑">
-            </div>
-            <div class="slider-row">
-              <div class="slider-label"><span>转动上限</span><b id="angleLimitVal">30°</b></div>
-              <input id="angleLimit" type="range" min="10" max="30" step="1" value="30" aria-label="转动上限">
             </div>
             <div class="toggle-row">
               <div class="toggle-copy"><b>镜像跟随</b><small>像照镜子一样同向转动</small></div>
@@ -160,6 +180,7 @@
               <div class="toggle-copy"><b>鼠标跟随</b><small>关闭摄像头时，用鼠标逗它转头</small></div>
               <button type="button" class="switch" id="mouseFollowToggle" role="switch" aria-checked="true" aria-label="鼠标跟随"><i></i></button>
             </div>
+            <p class="fineprint">具体哪些参数参与面捕、输入/输出范围，都在「映射」标签页里设置。</p>
           </div>
 
           <div class="panel-block">
@@ -175,6 +196,52 @@
             <p class="fineprint">开启后保持正脸约 1 秒，会自动记录你的头部中点；换人、换姿势后可以重新校准。</p>
           </div>
 
+          <div class="panel-block">
+            <div class="panel-head">
+              <h3>音频口型</h3>
+              <span class="mini-pill" id="lipSyncBadge">检测中</span>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-copy"><b>麦克风口型</b><small id="lipSyncNote">只在打开时申请麦克风权限；默认关闭</small></div>
+              <button type="button" class="switch" id="audioToggle" role="switch" aria-checked="false" aria-label="麦克风口型" disabled><i></i></button>
+            </div>
+            <div class="audio-options" id="audioOptions" hidden>
+              <div class="slider-row">
+                <div class="slider-label"><span>灵敏度</span><b id="audioGainVal">100%</b></div>
+                <input id="audioGain" type="range" min="30" max="250" step="1" value="100" aria-label="麦克风灵敏度">
+              </div>
+              <div class="slider-row">
+                <div class="slider-label"><span>静音门限</span><b id="audioGateVal">5%</b></div>
+                <input id="audioGate" type="range" min="0" max="30" step="1" value="5" aria-label="麦克风静音门限">
+              </div>
+              <div class="meter-row"><span>音量</span><div class="meter"><i id="audioMeter"></i></div><b id="audioLevelVal">0%</b></div>
+              <div class="vowel-meters" id="vowelMeters" hidden></div>
+              <div class="vowel-calibrate" id="vowelCalibrate" hidden></div>
+              <p class="fineprint" id="vowelCalibrateNote" hidden>逐个校准元音可显著改善口型：点 A/I/U/E/O 的「校准」，持续发对应音约 1 秒。</p>
+              <div class="vowel-controls" id="vowelControls" hidden>
+                <div class="panel-subhead">元音权重</div>
+                <div class="vowel-weights" id="vowelWeights"></div>
+                <div class="vowel-weight-sum" id="vowelWeightSum"><span>权重总和</span><b>500%</b></div>
+                <div class="slider-row">
+                  <div class="slider-label"><span>元音过渡</span><b id="vowelSmoothingVal">45ms</b></div>
+                  <input id="vowelSmoothing" type="range" min="0" max="150" step="5" value="45" aria-label="元音过渡时间">
+                </div>
+                <p class="fineprint">权重越高，该元音越容易压低 Silence；过渡越短越利落，越长越连贯。五项权重合计应为 500%，否则会红色提示可能出问题。</p>
+              </div>
+            </div>
+            <p class="fineprint">U/O 默认加权、E 降权；元音之间约 45ms 交叉过渡，不是慢速平滑。</p>
+            <p class="fineprint">音频会和摄像头嘴部按 Silence 权重混合；没有 LipSync 参数的模型不会启用。</p>
+          </div>
+
+          <div class="panel-block">
+            <div class="panel-head">
+              <h3>物理手感</h3>
+              <button type="button" class="link-btn" id="resetPhysics">复位</button>
+            </div>
+            <div id="physicsControls"></div>
+            <p class="fineprint">只调整模型 physics 的分组强度、呼吸和阻尼，不直接改写物理输出参数。</p>
+          </div>
+
           <div class="panel-block telemetry">
             <div class="panel-head">
               <h3>实时数据</h3>
@@ -185,6 +252,41 @@
             <div class="meter-row"><span>头部 Z</span><div class="meter"><i id="meterRoll"></i></div><b id="valRoll">0°</b></div>
             <div class="meter-row"><span>嘴巴</span><div class="meter"><i id="meterMouth"></i></div><b id="valMouth">0%</b></div>
             <div class="meter-row"><span>眨眼</span><div class="meter"><i id="meterBlink"></i></div><b id="valBlink">0%</b></div>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="mapping" hidden>
+          <div class="panel-head">
+            <h2>参数映射</h2>
+            <button type="button" class="link-btn" id="resetMapping">恢复默认</button>
+          </div>
+          <p class="fineprint mapping-intro">
+            每一组把「摄像头参数范围」映射到「模型参数范围」。一个摄像头参数可以映射到多个模型参数；同一个模型参数只能出现在一个组里。没有摄像头参数的「空对照组」不参与面捕，可对眼睛开合选择自动眨眼。<br>
+            默认映射使用 Cubism 标准参数 ID，模型没有的参数会自动跳过；当前模型的所有参数都可以在「模型参数」下拉里手动添加。模型 physics 自动计算的参数（例如头发、耳朵、尾巴、身体联动等，具体以当前模型的 physics 分组为准）会从可映射目标中排除，避免破坏物理。Silence 由元音强度总和自动驱动：没有元音时为 1，Open/Smile 生效；A/I/U/E/O 总和越大越低，归零时由元音口型接管，不允许手动映射。
+          </p>
+          <div class="mapping-toolbar">
+            <button type="button" class="btn btn-soft" id="addGroup">+ 对照组</button>
+            <button type="button" class="btn btn-soft" id="addEmptyGroup">+ 空对照组</button>
+            <span class="mini-pill" id="mappingCount">0 组</span>
+          </div>
+          <div class="mapping-list" id="mappingList"></div>
+        </section>
+
+        <section class="tab-panel" data-panel="expressions" hidden>
+          <div class="panel-head">
+            <h2>表情触发</h2>
+            <button type="button" class="link-btn" id="clearExpression">清除当前</button>
+          </div>
+          <div class="expression-empty" id="expressionEmpty">
+            当前模型没有表情文件（Expressions）。换一个带表情的模型后，这里会出现可触发的表情列表。
+          </div>
+          <div id="expressionSettingsBlock" hidden>
+            <div class="toggle-row">
+              <div class="toggle-copy"><b>屏幕右侧按键</b><small>在舞台右侧显示表情按钮</small></div>
+              <button type="button" class="switch" id="expressionVisibleToggle" role="switch" aria-checked="true" aria-label="显示表情按键"><i></i></button>
+            </div>
+            <p class="fineprint">给每个表情设置快捷键：点一下按键框，然后按下想用的键；Esc 取消，Backspace 清除。快捷键按模型保存在本机缓存。</p>
+            <div class="shortcut-list" id="expressionShortcutList"></div>
           </div>
         </section>
 
@@ -227,18 +329,27 @@
         <section class="tab-panel" data-panel="view" hidden>
           <div class="panel-head"><h2>视图</h2><button type="button" class="link-btn" id="resetView">重置</button></div>
           <div class="panel-block">
+            <div class="panel-head"><h3>模型</h3><button type="button" class="link-btn" id="refreshModels">刷新列表</button></div>
+            <label class="select-row">
+              <span>当前模型</span>
+              <select id="modelSelectPanel"></select>
+            </label>
+            <p class="fineprint">模型放在 <code>L2d_model/</code> 或 <code>L2d_models/</code> 里，本地启动时会自动扫描；部署到静态站点后运行 <code>scan_models.py</code> 生成 <code>models.json</code>。</p>
+          </div>
+          <div class="panel-block">
             <div class="slider-row">
               <div class="slider-label"><span>缩放</span><b id="zoomVal">100%</b></div>
-              <input id="zoom" type="range" min="60" max="180" step="1" value="100" aria-label="缩放">
+              <input id="zoom" type="range" min="30" max="300" step="1" value="100" aria-label="缩放">
             </div>
             <div class="slider-row">
               <div class="slider-label"><span>上下位置</span><b id="offsetYVal">0%</b></div>
-              <input id="offsetY" type="range" min="-40" max="40" step="1" value="0" aria-label="上下位置">
+              <input id="offsetY" type="range" min="-80" max="80" step="1" value="0" aria-label="上下位置">
             </div>
             <div class="slider-row">
               <div class="slider-label"><span>左右位置</span><b id="offsetXVal">0%</b></div>
-              <input id="offsetX" type="range" min="-40" max="40" step="1" value="0" aria-label="左右位置">
+              <input id="offsetX" type="range" min="-80" max="80" step="1" value="0" aria-label="左右位置">
             </div>
+            <p class="fineprint">鼠标左键拖拽模型位移，中键复原位置，滚轮放大/缩小；触屏单指拖动、双指捏合缩放/平移、双击复位。</p>
           </div>
           <div class="panel-block">
             <h3>显示</h3>
@@ -249,6 +360,32 @@
             <div class="inline-actions">
               <button type="button" class="btn btn-primary" id="shotFromPanel"><svg><use href="#i-download"/></svg> 保存当前画面</button>
             </div>
+          </div>
+          <div class="panel-block">
+            <h3>直播 / OBS</h3>
+            <div class="inline-actions">
+              <button type="button" class="btn btn-primary" id="streamModeBtn">进入透明直播模式</button>
+              <button type="button" class="btn btn-soft" id="copyStreamUrl">复制 OBS 地址</button>
+            </div>
+            <p class="fineprint">直播模式隐藏所有网页 UI，并把背景强制为透明；在 OBS 里添加「浏览器源」捕获这个页面即可。摄像头权限由 OBS 浏览器源决定，若被拒绝仍可使用鼠标跟随/待机。</p>
+          </div>
+          <div class="panel-block">
+            <h3>配置</h3>
+            <div class="inline-actions">
+              <button type="button" class="btn btn-soft" id="exportConfig">导出配置</button>
+              <button type="button" class="btn btn-soft" id="importConfig">导入配置</button>
+            </div>
+            <input type="file" id="importFile" accept="application/json,.json" hidden>
+            <div class="toggle-row">
+              <div class="toggle-copy"><b>导出时包含背景图</b><small>图片较大，默认不导出</small></div>
+              <button type="button" class="switch" id="exportBgToggle" role="switch" aria-checked="false" aria-label="导出背景图"><i></i></button>
+            </div>
+            <p class="fineprint" id="configStatus">配置只保存在本机浏览器，不会上传。</p>
+          </div>
+          <div class="panel-block">
+            <h3>当前模型</h3>
+            <button type="button" class="btn btn-soft danger" id="resetModelProfile">重置本模型的视图、手感与物理</button>
+            <p class="fineprint">只影响当前模型；映射表用「映射」页的恢复默认。</p>
           </div>
           <div class="panel-block">
             <h3>关于</h3>

@@ -1,11 +1,12 @@
 /**
  * FaceMapper —— 把 MediaPipe 的 478 个关键点 + 52 个表情系数，
- * 映射成 Live2D 参数（角度、眼睛、嘴、眉毛、表情、身体）。
+ * 经过“可配置映射组”转换成 Live2D 参数。
  *
- * 完全不依赖具体模型；缺失的参数会被舞台忽略。
+ * 每个映射组：一个摄像头来源 + 输入范围 + 多个模型目标及其输出范围。
+ * 来源为 null 的空组：目标保持默认值；如果是眼睛开合且打开 autoBlink，会走自动眨眼。
  */
 import { clamp, clamp01 } from './utils.js';
-import { PARAM_RANGES } from './config.js';
+import { DEFAULT_PARAM_VALUES, PARAM_RANGES, isEyeOpenParam, isFaceParam } from './config.js';
 
 const EYE_L = [33, 133, 159, 145];
 const EYE_R = [362, 263, 386, 374];
@@ -15,29 +16,8 @@ const CHEEK_L = 234;
 const CHEEK_R = 454;
 
 const CALIB_SAMPLES = 40;
-
-const BASE_PARAMS = {
-  ParamAngleX: 0,
-  ParamAngleY: 0,
-  ParamAngleZ: 0,
-  ParamEyeLOpen: 1,
-  ParamEyeROpen: 1,
-  ParamEyeLSmile: 0,
-  ParamEyeRSmile: 0,
-  ParamEyeBallX: 0,
-  ParamEyeBallY: 0,
-  ParamBrowLY: 0,
-  ParamBrowRY: 0,
-  ParamMouthOpenY: 0,
-  ParamMouthForm: 0,
-  ParamCheek: 0,
-  ParamTongue: 0,
-  ParamNose: 0,
-  ParamBodyAngleX: 0,
-  ParamBreath: 0.42,
-};
-
 const FAST_KEYS = new Set(['ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen']);
+const VOWEL_KEYS = new Set(['ParamA', 'ParamI', 'ParamU', 'ParamE', 'ParamO']);
 const SLOW_KEYS = new Set(['ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX']);
 
 function avgPoint(landmarks, indices) {
@@ -58,28 +38,68 @@ function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-/** 去掉静息噪声，避免模型一直斜眼 / 皱眉 */
 function softDeadzone(v, d) {
   if (Math.abs(v) <= d) return 0;
   return (v - Math.sign(v) * d) / (1 - d);
 }
 
+function applyCurve(t, curve) {
+  const x = clamp01(t);
+  if (curve === 'soft') return 1 - (1 - x) * (1 - x);
+  if (curve === 'strong') return x * x;
+  if (curve === 'smooth') return x * x * (3 - 2 * x);
+  return x;
+}
+
+/**
+ * 输入范围 → 输出范围。
+ * mirror=true 时按 0 的左右两侧分别做奇函数曲线，保证 f(-x) = -f(x)；
+ * 例如头部左右、歪头、眼神、眉毛、嘴型在正负方向上手感一致。
+ */
+function mapRange(value, inMin, inMax, outMin, outMax, curve = 'linear', mirror = false) {
+  const a = Number(inMin);
+  const b = Number(inMax);
+  const lo = Number(outMin);
+  const hi = Number(outMax);
+  const v = Number(value);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || Math.abs(b - a) < 1e-9) return Number.isFinite(lo) ? lo : 0;
+  if (!Number.isFinite(v)) return lo;
+  if (mirror && a < 0 && b > 0) {
+    const center = (lo + hi) / 2;
+    if (v >= 0) {
+      const c = applyCurve(clamp01(v / b), curve);
+      return center + c * (hi - center);
+    }
+    const c = applyCurve(clamp01(-v / -a), curve);
+    return center - c * (center - lo);
+  }
+  const t = applyCurve(clamp((v - a) / (b - a), 0, 1), curve);
+  return lo + t * (hi - lo);
+}
+
 export class FaceMapper {
   constructor(settings) {
     this.settings = settings;
-    this.smoothed = { ...BASE_PARAMS };
-    this.targets = { ...BASE_PARAMS };
+    this.mapping = { groups: [] };
+    this.paramMeta = [];
+    this.paramDefaults = { ...DEFAULT_PARAM_VALUES };
+    this.paramRangeMap = new Map();
+    this.smoothed = { ...DEFAULT_PARAM_VALUES };
+    this.targets = { ...DEFAULT_PARAM_VALUES };
+    this.previousMapped = new Set();
     this.facePresent = false;
     this.lastFaceAt = -1e9;
     this.raw = null;
     this.bs = {};
-    this.now = 0;
-    this.cameraOn = false;
     this.calib = this._emptyCalibration();
     this.calibrating = false;
     this.calibProgress = 0;
     this.autoBlink = { nextAt: 0, start: -1, amount: 0 };
-    this._prevCalibrating = false;
+    this.breathAmplitude = 1;
+    this.breathSpeed = 1;
+    this.vowelMode = false;
+    this.vowelParams = [];
+    this.vowels = {};
     this._state = {
       facePresent: false,
       calibrating: false,
@@ -113,6 +133,7 @@ export class FaceMapper {
       sumSmile: 0,
       sumFrown: 0,
       sumSquint: 0,
+      sumMouthForm: 0,
       yaw: 0,
       pitch: 0,
       roll: 0,
@@ -124,6 +145,7 @@ export class FaceMapper {
       smile: 0,
       frown: 0,
       squint: 0,
+      mouthForm: 0,
       done: false,
       startedAt: 0,
     };
@@ -133,42 +155,61 @@ export class FaceMapper {
     this.settings = settings;
   }
 
+  setMapping(mapping) {
+    this.mapping = mapping && Array.isArray(mapping.groups) ? mapping : { groups: [] };
+  }
+
+  setBreathSettings(profile = {}) {
+    const amp = Number(profile.breath);
+    const speed = Number(profile.breathSpeed);
+    this.breathAmplitude = Number.isFinite(amp) ? Math.max(0.2, Math.min(2, amp)) : 1;
+    this.breathSpeed = Number.isFinite(speed) ? Math.max(0.3, Math.min(2.5, speed)) : 1;
+  }
+
+  setVowelParams(ids) {
+    this.vowelParams = Array.isArray(ids) ? ids.filter(Boolean) : [];
+  }
+
+  setVowelMode(on) {
+    this.vowelMode = !!on;
+  }
+
+  setModelInfo(paramMeta, defaults) {    this.paramMeta = Array.isArray(paramMeta) ? paramMeta : [];
+    this.paramDefaults = { ...DEFAULT_PARAM_VALUES, ...(defaults || {}) };
+    this.paramRangeMap.clear();
+    for (const p of this.paramMeta) this.paramRangeMap.set(p.id, [p.min, p.max]);
+    this.smoothed = { ...this.paramDefaults };
+    this.targets = {};
+    this.previousMapped.clear();
+    this.facePresent = false;
+    this.lastFaceAt = -1e9;
+    this.raw = null;
+    this.resetCalibration();
+  }
+
   resetCalibration() {
     this.calib = this._emptyCalibration();
     this.calibrating = false;
     this.calibProgress = 0;
-    this._prevCalibrating = false;
   }
 
   resetTracking() {
     this.facePresent = false;
     this.lastFaceAt = -1e9;
     this.raw = null;
-    this.smoothed = { ...BASE_PARAMS };
-    this.targets = { ...BASE_PARAMS };
+    this.smoothed = { ...this.paramDefaults };
+    this.targets = {};
+    this.previousMapped.clear();
     this.autoBlink.start = -1;
     this.autoBlink.amount = 0;
     this.autoBlink.nextAt = 0;
     this.resetCalibration();
   }
 
-  /**
-   * @param {object} opts
-   * @param {object|null|undefined} opts.detection  MediaPipe 结果
-   * @param {boolean} opts.newFrame 是否是新视频帧
-   * @param {number} opts.now performance.now()
-   * @param {number} opts.dt 秒
-   * @param {boolean} opts.cameraOn
-   * @param {{x:number,y:number}} opts.pointer -1..1
-   * @param {number} opts.fps
-   */
-  update({ detection, newFrame = false, now, dt, cameraOn, pointer = { x: 0, y: 0 }, fps = 0 }) {
+  update({ detection, newFrame = false, now, dt, cameraOn, pointer = { x: 0, y: 0 }, fps = 0, audioLevel = 0, audioVowels = null }) {
     this.now = now;
-    this.cameraOn = cameraOn;
+    this.vowels = audioVowels && typeof audioVowels === 'object' ? audioVowels : {};
     const s = this.settings;
-    const gains = s.gains;
-    const mirror = s.mirror;
-    const mirrorSign = mirror ? 1 : -1;
 
     if (newFrame) {
       const lm = detection?.faceLandmarks?.[0];
@@ -177,7 +218,6 @@ export class FaceMapper {
         this.facePresent = true;
         this.lastFaceAt = now;
       } else if (now - this.lastFaceAt > 450) {
-        // 单帧漏检不立刻报“未检测到人脸”，给 0.45 秒缓冲
         this.facePresent = false;
       }
     } else if (this.facePresent && now - this.lastFaceAt > 900) {
@@ -188,33 +228,48 @@ export class FaceMapper {
     const present = this.facePresent && !!this.raw;
     this.calibrating = present && !this.calib.done;
     this.calibProgress = present && !this.calib.done ? clamp01(this.calib.samples / CALIB_SAMPLES) : 1;
+    if (present && !this.calib.done) this._sampleCalibration(now);
 
-    if (present && !this.calib.done) {
-      this._sampleCalibration(now);
+    const auto = this._autoBlinkAmount(now, dt, true);
+    const faceSources = present ? this._faceSources(this.calib.done) : null;
+    const idleSources = this._idleSources(now, cameraOn, pointer, auto);
+    const audio = Number(audioLevel) > 0.015 ? clamp01(Number(audioLevel)) : 0;
+    if (!this.vowelMode && audio > 0) {
+      if (faceSources) faceSources.jaw = Math.max(faceSources.jaw, audio);
+      idleSources.jaw = Math.max(idleSources.jaw, audio);
     }
-
-    this._computeTargets({ present, now, dt, cameraOn, pointer, mirrorSign, gains, s });
+    this._computeTargets({ present, faceSources, idleSources, auto });
     this._smooth(dt, s.smoothing);
 
-    const params = { ...BASE_PARAMS, ...this.smoothed };
+    const params = {};
+    for (const key of Object.keys(this.targets)) {
+      if (key in this.smoothed) params[key] = this.smoothed[key];
+    }
+
+    const eyeL = params.ParamEyeLOpen;
+    const eyeR = params.ParamEyeROpen;
+    const hasEyes = Number.isFinite(eyeL) || Number.isFinite(eyeR);
+    const eyeOpen = hasEyes ? ((eyeL ?? 1) + (eyeR ?? 1)) / 2 : clamp01(1 - auto);
+    const vowelMouth = this.vowelMode
+      ? Math.max(0, ...this.vowelParams.map((id) => Number(params[id]) || 0))
+      : 0;
     this._state = {
       facePresent: present,
       calibrating: this.calibrating,
       calibProgress: this.calibProgress,
-      yaw: params.ParamAngleX,
-      pitch: params.ParamAngleY,
-      roll: params.ParamAngleZ,
-      mouth: params.ParamMouthOpenY,
-      blink: 1 - (params.ParamEyeLOpen + params.ParamEyeROpen) / 2,
-      eyeOpen: (params.ParamEyeLOpen + params.ParamEyeROpen) / 2,
-      brow: (params.ParamBrowLY + params.ParamBrowRY) / 2,
-      gazeX: params.ParamEyeBallX,
-      gazeY: params.ParamEyeBallY,
-      expression: params.ParamMouthForm,
+      yaw: params.ParamAngleX ?? 0,
+      pitch: params.ParamAngleY ?? 0,
+      roll: params.ParamAngleZ ?? 0,
+      mouth: Math.max(params.ParamMouthOpenY ?? 0, vowelMouth),
+      blink: 1 - eyeOpen,
+      eyeOpen,
+      brow: ((params.ParamBrowLY ?? 0) + (params.ParamBrowRY ?? 0)) / 2,
+      gazeX: params.ParamEyeBallX ?? 0,
+      gazeY: params.ParamEyeBallY ?? 0,
+      expression: params.ParamMouthForm ?? 0,
       fps,
       delegate: '',
     };
-
     return { params, state: this._state };
   }
 
@@ -246,6 +301,9 @@ export class FaceMapper {
       jaw: bs.jawOpen || 0,
       smile: ((bs.mouthSmileLeft || 0) + (bs.mouthSmileRight || 0)) / 2,
       frown: ((bs.mouthFrownLeft || 0) + (bs.mouthFrownRight || 0)) / 2,
+      mouthForm:
+        (((bs.mouthSmileLeft || 0) + (bs.mouthSmileRight || 0)) / 2) -
+        (((bs.mouthFrownLeft || 0) + (bs.mouthFrownRight || 0)) / 2) * 0.85,
       blinkL: bs.eyeBlinkLeft || 0,
       blinkR: bs.eyeBlinkRight || 0,
       squint: ((bs.eyeSquintLeft || 0) + (bs.eyeSquintRight || 0)) / 2,
@@ -279,7 +337,6 @@ export class FaceMapper {
     if (!this.raw) return;
     const c = this.calib;
     if (!c.startedAt) c.startedAt = now;
-    // 丢弃特别夸张的帧，避免校准被一个大动作带偏
     if (Math.abs(this.raw.yaw) > 34 || Math.abs(this.raw.pitch) > 32 || Math.abs(this.raw.roll) > 36) return;
     c.samples += 1;
     c.sumYaw += this.raw.yaw;
@@ -293,6 +350,7 @@ export class FaceMapper {
     c.sumSmile += this.raw.smile;
     c.sumFrown += this.raw.frown;
     c.sumSquint += this.raw.squint;
+    c.sumMouthForm += this.raw.mouthForm;
     const timedOut = c.samples >= 8 && now - c.startedAt > 2600;
     const forced = c.samples >= 1 && now - c.startedAt > 6500;
     if (c.samples >= CALIB_SAMPLES || timedOut || forced) {
@@ -308,6 +366,7 @@ export class FaceMapper {
       c.smile = c.sumSmile / n;
       c.frown = c.sumFrown / n;
       c.squint = c.sumSquint / n;
+      c.mouthForm = c.sumMouthForm / n;
       c.done = true;
       this.calibrating = false;
       this.calibProgress = 1;
@@ -338,101 +397,145 @@ export class FaceMapper {
     return b.amount;
   }
 
-  _computeTargets({ present, now, dt, cameraOn, pointer, mirrorSign, gains, s }) {
-    const t = { ...BASE_PARAMS };
+  _mirrorSources(v) {
+    if (this.settings.mirror) return v;
+    v.yaw = -v.yaw;
+    v.roll = -v.roll;
+    v.gazeX = -v.gazeX;
+    [v.blinkL, v.blinkR] = [v.blinkR, v.blinkL];
+    [v.browL, v.browR] = [v.browR, v.browL];
+    v.blink = (v.blinkL + v.blinkR) / 2;
+    return v;
+  }
+
+  _faceSources(ready) {
+    const r = this.raw;
+    const c = this.calib;
+    const yaw = ready ? r.yaw - c.yaw : 0;
+    const pitch = ready ? r.pitch - c.pitch : 0;
+    const roll = ready ? r.roll - c.roll : 0;
+    const smile = r.smile - c.smile;
+    const frown = r.frown - c.frown;
+    const squint = r.squint - c.squint;
+    const browRawL = r.browInner * 0.9 + r.browOuterL * 0.55 - r.browDownL * 0.85;
+    const browRawR = r.browInner * 0.9 + r.browOuterR * 0.55 - r.browDownR * 0.85;
+    const blinkL = r.blinkL;
+    const blinkR = r.blinkR;
+    const sources = {
+      yaw,
+      pitch,
+      roll,
+      blinkL,
+      blinkR,
+      blink: (blinkL + blinkR) / 2,
+      jaw: r.jaw - c.jaw,
+      mouthForm: softDeadzone(r.mouthForm - c.mouthForm, 0.03),
+      smile: Math.max(0, smile),
+      frown,
+      gazeX: softDeadzone(r.gazeX - c.gazeX, 0.06),
+      gazeY: softDeadzone(r.gazeY - c.gazeY, 0.06),
+      browL: softDeadzone(browRawL - c.browL, 0.1),
+      browR: softDeadzone(browRawR - c.browR, 0.1),
+      browInner: r.browInner,
+      tongue: r.tongue,
+      sneer: r.sneer,
+      cheekPuff: r.cheekPuff,
+      squint,
+    };
+    return this._mirrorSources(sources);
+  }
+
+  _idleSources(now, cameraOn, pointer, auto) {
     const time = now / 1000;
-    const breath = 0.42 + 0.24 * Math.sin(time * 1.6);
-    t.ParamBreath = breath;
+    const swayX = Math.sin(time * 0.55) * 2.1 + Math.sin(time * 1.31) * 0.55;
+    const swayY = Math.sin(time * 0.72 + 1.2) * 1.5;
+    const swayZ = Math.sin(time * 0.43 + 0.5) * 1.8;
+    const follow = this.settings.mouseFollow && !cameraOn ? pointer : { x: 0, y: 0 };
+    const drift = Math.sin(time * 0.7) * 0.1 + Math.sin(time * 2.1) * 0.03;
+    const sources = {
+      yaw: -(swayX + follow.x * 16),
+      pitch: -swayY + follow.y * 10,
+      roll: -swayZ + follow.x * 3.5,
+      blinkL: auto,
+      blinkR: auto,
+      blink: auto,
+      jaw: 0,
+      mouthForm: 0,
+      smile: 0,
+      frown: 0,
+      gazeX: -(drift + follow.x * 0.35),
+      gazeY: Math.sin(time * 0.9 + 0.4) * 0.08 - follow.y * 0.25,
+      browL: 0,
+      browR: 0,
+      browInner: 0,
+      tongue: 0,
+      sneer: 0,
+      cheekPuff: 0,
+      squint: 0,
+    };
+    return this._mirrorSources(sources);
+  }
 
-    if (present && this.raw) {
-      const r = this.raw;
-      const c = this.calib;
-      const ready = c.done;
-      const limit = s.angleLimit || 30;
-      const headGain = gains.head * 1.35;
+  _defaultFor(id) {
+    return Object.prototype.hasOwnProperty.call(this.paramDefaults, id) ? this.paramDefaults[id] : DEFAULT_PARAM_VALUES[id] ?? 0;
+  }
 
-      const yaw = ready ? r.yaw - c.yaw : 0;
-      const pitch = ready ? r.pitch - c.pitch : 0;
-      const roll = ready ? r.roll - c.roll : 0;
+  _computeTargets({ present, faceSources, idleSources, auto }) {
+    const targets = {};
+    const mapped = new Set();
+    const groups = this.mapping.groups || [];
 
-      t.ParamAngleX = clamp(-yaw * headGain, -limit, limit) * mirrorSign;
-      t.ParamAngleY = clamp(-pitch * headGain, -limit, limit);
-      t.ParamAngleZ = clamp(-roll * headGain * 0.9, -limit, limit) * mirrorSign;
-      t.ParamBodyAngleX = clamp(t.ParamAngleX * 0.38 * gains.body, -10, 10);
-
-      // 眨眼：MediaPipe 的值在睁眼时也有 0.1~0.2，用曲线压掉底噪
-      const openFromBlink = (v) => {
-        const x = clamp01((v - 0.16) / 0.84);
-        return clamp01(1 - Math.pow(x, 0.85) * 1.1);
-      };
-      const blinkL = openFromBlink(r.blinkL);
-      const blinkR = openFromBlink(r.blinkR);
-      const eyeGain = gains.eyes;
-      const eyeOpenL = clamp01(1 - (1 - blinkL) * eyeGain);
-      const eyeOpenR = clamp01(1 - (1 - blinkR) * eyeGain);
-
-      if (s.mirror) {
-        t.ParamEyeLOpen = eyeOpenL;
-        t.ParamEyeROpen = eyeOpenR;
-      } else {
-        t.ParamEyeLOpen = eyeOpenR;
-        t.ParamEyeROpen = eyeOpenL;
+    for (const group of groups) {
+      if (!group || !Array.isArray(group.targets)) continue;
+      const sourceId = group.source || null;
+      let sourceValue = null;
+      if (sourceId) {
+        const values = present && faceSources ? faceSources : idleSources;
+        sourceValue = values?.[sourceId];
+        if (sourceValue == null) sourceValue = idleSources?.[sourceId] ?? 0;
       }
-
-      const smile = r.smile - c.smile;
-      const frown = r.frown - c.frown;
-      const squint = r.squint - c.squint;
-      const exprGain = gains.expression;
-      t.ParamEyeLSmile = clamp01((smile * 0.8 + squint * 0.6) * exprGain);
-      t.ParamEyeRSmile = t.ParamEyeLSmile;
-
-      t.ParamMouthOpenY = clamp01((r.jaw - c.jaw) * 2.75 * gains.mouth);
-      t.ParamMouthForm = clamp((smile - frown * 0.85) * 2.1 * exprGain, -1, 1);
-      t.ParamCheek = clamp01((smile * 0.7 + r.cheekPuff * 0.5) * exprGain);
-      t.ParamTongue = clamp01(r.tongue * 1.2 * exprGain);
-      t.ParamNose = clamp01(r.sneer * 1.2 * exprGain);
-
-      const browGain = gains.brows * 1.5;
-      const browRawL = r.browInner * 0.9 + r.browOuterL * 0.55 - r.browDownL * 0.85;
-      const browRawR = r.browInner * 0.9 + r.browOuterR * 0.55 - r.browDownR * 0.85;
-      const browL = clamp(softDeadzone(browRawL - c.browL, 0.1) * browGain, -1, 1);
-      const browR = clamp(softDeadzone(browRawR - c.browR, 0.1) * browGain, -1, 1);
-      if (s.mirror) {
-        t.ParamBrowLY = browL;
-        t.ParamBrowRY = browR;
-      } else {
-        t.ParamBrowLY = browR;
-        t.ParamBrowRY = browL;
+      for (const target of group.targets) {
+        if (!target || !target.param) continue;
+        let value;
+        if (sourceId) {
+          value = mapRange(sourceValue, group.inMin, group.inMax, target.outMin, target.outMax, target.curve, target.mirror);
+        } else if (group.autoBlink && isEyeOpenParam(target.param)) {
+          value = mapRange(auto, 0, 1, target.outMin, target.outMax);
+        } else {
+          value = this._defaultFor(target.param);
+        }
+        targets[target.param] = value;
+        mapped.add(target.param);
       }
-
-      const gazeX = clamp(softDeadzone(r.gazeX - c.gazeX, 0.06) * 1.5 * gains.eyes, -1, 1);
-      const gazeY = clamp(softDeadzone(r.gazeY - c.gazeY, 0.06) * 1.4 * gains.eyes, -1, 1);
-      t.ParamEyeBallX = clamp(-gazeX * mirrorSign + t.ParamAngleX * 0.006, -1, 1);
-      t.ParamEyeBallY = clamp(gazeY + t.ParamAngleY * 0.006, -1, 1);
-    } else {
-      // 待机：呼吸、微摆、眨眼、鼠标跟随
-      const swayX = Math.sin(time * 0.55) * 2.1 + Math.sin(time * 1.31) * 0.55;
-      const swayY = Math.sin(time * 0.72 + 1.2) * 1.5;
-      const swayZ = Math.sin(time * 0.43 + 0.5) * 1.8;
-      const follow = s.mouseFollow && !cameraOn ? pointer : { x: 0, y: 0 };
-      t.ParamAngleX = clamp(swayX + follow.x * 16, -22, 22);
-      t.ParamAngleY = clamp(swayY - follow.y * 10, -18, 18);
-      t.ParamAngleZ = clamp(swayZ - follow.x * 3.5, -12, 12);
-      t.ParamBodyAngleX = clamp(t.ParamAngleX * 0.28, -10, 10);
-
-      const auto = this._autoBlinkAmount(now, dt, true);
-      const eye = clamp01(1 - auto);
-      t.ParamEyeLOpen = eye;
-      t.ParamEyeROpen = eye;
-      t.ParamMouthOpenY = 0;
-      t.ParamMouthForm = 0;
-
-      const drift = Math.sin(time * 0.7) * 0.1 + Math.sin(time * 2.1) * 0.03;
-      t.ParamEyeBallX = clamp(drift + follow.x * 0.35, -1, 1);
-      t.ParamEyeBallY = clamp(Math.sin(time * 0.9 + 0.4) * 0.08 - follow.y * 0.25, -1, 1);
     }
 
-    this.targets = t;
+    // 未参与映射的面捕参数复位到模型默认值，避免残留上一次面捕的值。
+    for (const p of this.paramMeta) {
+      if (!mapped.has(p.id) && isFaceParam(p.id)) targets[p.id] = this._defaultFor(p.id);
+    }
+    for (const id of Object.keys(DEFAULT_PARAM_VALUES)) {
+      if (!mapped.has(id) && isFaceParam(id) && !(id in targets)) targets[id] = this._defaultFor(id);
+    }
+    for (const id of this.previousMapped) {
+      if (!mapped.has(id) && !(id in targets)) targets[id] = this._defaultFor(id);
+    }
+    this.previousMapped = mapped;
+
+    if (this.vowelMode && this.vowelParams.length) {
+      // 元音模式：A/I/U/E/O 由音频分类驱动；Open/Smile 仍保留摄像头值，
+      // 由 ParamSilence = 1 - 元音强度 在模型内部做连续混合。
+      for (const id of this.vowelParams) {
+        const key = id.replace(/^Param/, '');
+        targets[id] = clamp01(Number(this.vowels[key] ?? this.vowels[id]) || 0);
+      }
+    } else {
+      for (const id of this.vowelParams) targets[id] = 0;
+    }
+
+    if (!mapped.has('ParamBreath')) {
+      targets.ParamBreath = 0.42 + 0.24 * this.breathAmplitude * Math.sin((this.now / 1000) * 1.6 * this.breathSpeed);
+    }
+    this.targets = targets;
   }
 
   _smooth(dt, smoothing) {
@@ -445,12 +548,17 @@ export class FaceMapper {
       if (tau <= 0.004) return 1;
       return 1 - Math.exp(-Math.max(0.0001, dt) / tau);
     };
-    for (const key of Object.keys(BASE_PARAMS)) {
-      if (!(key in this.smoothed)) this.smoothed[key] = BASE_PARAMS[key];
-      const target = this.targets[key] ?? BASE_PARAMS[key];
+    for (const key of Object.keys(this.targets)) {
+      if (!(key in this.smoothed)) this.smoothed[key] = this._defaultFor(key);
+      const target = Number(this.targets[key]);
+      // 元音口型不做平滑：说话时 A/I/U/E/O 是突变切换的。
+      if (VOWEL_KEYS.has(key)) {
+        this.smoothed[key] = target;
+        continue;
+      }
       const alpha = alphaFor(key);
       this.smoothed[key] += (target - this.smoothed[key]) * alpha;
-      const range = PARAM_RANGES[key];
+      const range = this.paramRangeMap.get(key) || PARAM_RANGES[key];
       if (range) this.smoothed[key] = clamp(this.smoothed[key], range[0], range[1]);
     }
   }

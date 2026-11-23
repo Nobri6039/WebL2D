@@ -4,6 +4,10 @@ _dev/
 node_modules/
 *.log
 tmp-*.txt
+._*
+screenshots/
+__pycache__/
+*.pyc
 
 # 系统文件
 .DS_Store
