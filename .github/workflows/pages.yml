@@ -30,7 +30,7 @@ jobs:
       - name: Prepare static site
         run: |
           mkdir -p _site
-          cp -R index.html css js vendor assets L2d_model L2d_models models.json README.md RELEASE_NOTES.md THIRD_PARTY_NOTICES.md .nojekyll _site/
+          cp -R index.html css js vendor assets L2d_model L2d_models models.json screenshots README.md RELEASE_NOTES.md THIRD_PARTY_NOTICES.md .nojekyll _site/
           # 本地启动脚本一并带上，方便下载后本地运行
           cp -R start.cmd server.py scan_models.py _site/
 
